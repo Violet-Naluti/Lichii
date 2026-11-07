@@ -929,7 +929,12 @@ bool KeplerCompute::BypassOotNetwork(u64 program_id, u64 native_key) {
     if (native_key == PrepassProgramKey || native_key == NetworkProgramKey) {
         return state->output_replaced.load(std::memory_order_relaxed);
     }
-    if (native_key != OutputProgramKey) {
+        // Debug override: EDEN_NX2_OOT_OUTPUT_KEY=<hex> selects another compute program as the output pass.
+    static const u64 output_key = [] {
+        const char* text = std::getenv("EDEN_NX2_OOT_OUTPUT_KEY");
+        return text ? std::strtoull(text, nullptr, 16) : OutputProgramKey;
+    }();
+    if (native_key != output_key) {
         return false;
     }
     // The copy needs the tonemapped image to be a B10G11R11 block-linear image of the output's size.
