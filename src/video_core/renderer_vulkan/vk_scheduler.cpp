@@ -664,6 +664,63 @@ void Scheduler::ReportWorkTimes() {
         }
         total_ms += ms;
     }
+    // Time between consecutive timed items: everything that is not timed (barriers, render pass
+    // begin/end, clears, copies, uploads). The timestamps are bottom-of-pipe, so a gap also holds
+    // whatever the GPU was still finishing. A gap across a submission boundary also holds the upload
+    // command buffer and any time the GPU waited for the next submission.
+    double inner_gap_ms{};
+    double boundary_gap_ms{};
+    u32 inner_gaps{};
+    u32 boundary_gaps{};
+    struct Gap {
+        double ms{};
+        u32 from{};
+        u32 to{};
+    };
+    std::array<Gap, 5> top_gaps{};
+    {
+        bool have_prev = false;
+        u32 prev = 0;
+        for (u32 i = 0; i < count; ++i) {
+            if (results[i * 2].available == 0 || results[i * 2 + 1].available == 0) {
+                have_prev = false;
+                continue;
+            }
+            if (have_prev) {
+                const double ms = static_cast<double>(Common::DkbFrameTrace::TimestampDelta(
+                                      results[prev * 2 + 1].timestamp, results[i * 2].timestamp,
+                                      trace_timestamp_bits)) *
+                                  trace_timestamp_period / 1e6;
+                if (ms < 1000.0) {
+                    if (trace_work_items[prev].submission == trace_work_items[i].submission) {
+                        inner_gap_ms += ms;
+                        ++inner_gaps;
+                        if (ms > top_gaps.back().ms) {
+                            top_gaps.back() = {ms, prev, i};
+                            std::ranges::sort(top_gaps, std::greater<>{},
+                                              [](const Gap& gap) { return gap.ms; });
+                        }
+                    } else {
+                        boundary_gap_ms += ms;
+                        ++boundary_gaps;
+                    }
+                }
+            }
+            have_prev = true;
+            prev = i;
+        }
+    }
+    std::string biggest_gaps;
+    for (const Gap& gap : top_gaps) {
+        if (gap.ms < 0.2) {
+            continue;
+        }
+        const WorkTrace& before = trace_work_items[gap.from];
+        const WorkTrace& after = trace_work_items[gap.to];
+        biggest_gaps += fmt::format(" {:.3f}ms(after {:016x}+{:016x} before {:016x}+{:016x})",
+                                    gap.ms, before.hash, before.fragment_hash, after.hash,
+                                    after.fragment_hash);
+    }
     std::vector<std::pair<std::pair<u64, u64>, Totals>> sorted(by_shaders.begin(),
                                                                by_shaders.end());
     std::ranges::sort(sorted, std::greater<>{},
@@ -684,6 +741,11 @@ void Scheduler::ReportWorkTimes() {
     LOG_INFO(Render_Vulkan,
              "DKB gpu_work renderer_frame={} timed={} timed_sum_ms={:.3f} slowest:{}",
              trace_sample_frame, count, total_ms, slowest);
+    LOG_INFO(Render_Vulkan,
+             "DKB gpu_gaps renderer_frame={} items_ms={:.3f} inner_gap_ms={:.3f}/{} "
+             "boundary_gap_ms={:.3f}/{} biggest:{}",
+             trace_sample_frame, total_ms, inner_gap_ms, inner_gaps, boundary_gap_ms,
+             boundary_gaps, biggest_gaps);
 }
 
 void Scheduler::TraceGpuSubmission() {
